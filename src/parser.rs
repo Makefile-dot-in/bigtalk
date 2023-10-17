@@ -33,10 +33,10 @@ impl fmt::Display for ParseError {
 
 #[derive(Debug)]
 pub struct MessageDef {
-    selector: String,
-    args: Vec<String>,
-    vardecl: Vec<String>,
-    body: Vec<Expr>,
+    pub selector: String,
+    pub args: Vec<String>,
+    pub vardecl: Vec<String>,
+    pub body: Vec<Expr>,
 }
 
 impl MessageDef {

@@ -1,137 +1,199 @@
-mod opcodes {
-	pub const PUSH_NIL:     u8 = 0;
-	pub const PUSH_SELF:    u8 = 1;
-	pub const PUSH_TRUE:    u8 = 2;
-	pub const PUSH_FALSE:   u8 = 2;
-	pub const PUSH_ZERO:    u8 = 3;
-	pub const PUSH_ONE:     u8 = 4;
-	pub const PUSH_TWO:     u8 = 5;
-	pub const PUSH_CHAR:    u8 = 6;
-	pub const PUSH_INT:     u8 = 7;
-	pub const PUSH_FLOAT:   u8 = 8;
-	pub const PUSH_FIELD:   u8 = 9;
-	pub const PUSH_LOCAL:   u8 = 10;
-	pub const PUSH_STRING:  u8 = 11;
-	pub const PUSH_GLOBAL:  u8 = 12;
-	pub const PUSH_ARRAY:   u8 = 13;
-	pub const PUSH_BLOCK:   u8 = 14;
-	pub const STORE_FIELD:  u8 = 15;
-	pub const STORE_LOCAL:  u8 = 16;
-	pub const POP:          u8 = 17;
-	pub const SEND:         u8 = 18;
-	pub const SEND_PLUS:    u8 = 19;
-	pub const SEND_MINUS:   u8 = 20;
-	pub const SEND_DIV:     u8 = 21;
-	pub const SEND_MUL:     u8 = 22;
-	pub const RETURN:       u8 = 23;
-	pub const RETURN_BLOCK: u8 = 24;
 
-	fn add_int<T, I>(start: usize, arr: &mut [u8], i: T, f: fn(T) -> I)
-	where I: IntoIterator<Item = u8> {
-		for (i, b) in f(i).into_iter().enumerate() {
-			arr[start+i] = b;
-		}
-	}
-	
-	pub trait Bytecodable {
-		fn add_byte(&mut self, b: &[u8]);
-		fn change_idx(&mut self, idx: u16, val: u8);
-		fn pos(&self) -> u16;
-		
-		fn push_nil(&mut self) {
-			self.add_byte(&[PUSH_NIL]);
-		}
+use std::collections::HashSet;
+use std::hash::Hash;
 
-		fn push_self(&mut self) {
-			self.add_byte(&[PUSH_SELF]);
-		}
+use crate::{opcodes::Bytecodable, parser::{Expr, MessageDef, Location, PureExpr}};
+use crate::index_or_push;
 
-		fn push_true(&mut self) {
-			self.add_byte(&[PUSH_TRUE]);
-		}
+pub struct CompileError(String, Location);
 
-		fn push_false(&mut self) {
-			self.add_byte(&[PUSH_FALSE]);
-		}
-
-		fn push_char(&mut self, c: char) {
-			// 1 instr + 4 char
-			let mut arr: [u8; 5] = [0; 5];
-			arr[0] = PUSH_CHAR;
-			add_int(1, &mut arr, c as u32, u32::to_be_bytes);
-			self.add_byte(&arr);
-		}
-
-		fn push_int(&mut self, i: i64) {
-			// 1 instr + 8 i64
-			let mut arr: [u8; 9] = [0; 9];
-			arr[0] = PUSH_INT;
-			add_int(1, &mut arr, i, i64::to_be_bytes);
-			self.add_byte(&arr);
-		}
-
-		fn push_float(&mut self, f: f64) {
-			// 1 instr + 8 f64
-			let mut arr: [u8; 9] = [0; 9];
-			arr[0] = PUSH_FLOAT;
-			add_int(1, &mut arr, f, f64::to_be_bytes);
-			self.add_byte(&arr);
-		}
-
-		fn push_field(&mut self, i: u16) {
-			// 1 instr + 2 u16
-			let mut arr: [u8; 3] = [0; 3];
-			arr[0] = PUSH_FIELD;
-			add_int(1, &mut arr, i, u16::to_be_bytes);
-			self.add_byte(&arr);
-		}
-
-		fn push_local(&mut self, i: u16) {
-			// 1 instr + 2 u16
-			let mut arr: [u8; 3] = [0; 3];
-			arr[0] = PUSH_LOCAL;
-			add_int(1, &mut arr, i, u16::to_be_bytes);
-			self.add_byte(&arr);
-		}
-
-		fn push_string(&mut self, s: &str) {
-			// 1 instr + 2 u16
-			let mut arr: [u8; 3] = [0; 3];
-			arr[0] = PUSH_STRING;
-			add_int(1, &mut arr, s.len() as u16, u16::to_be_bytes);
-			self.add_byte(&arr);
-			self.add_byte(s.as_bytes());
-		}
-
-		fn push_global(&mut self, s: &str) {
-			// 1 instr + 2 u16
-			let mut arr: [u8; 3] = [0; 3];
-			arr[0] = PUSH_GLOBAL;
-			add_int(1, &mut arr, s.len() as u16, u16::to_be_bytes);
-			self.add_byte(&arr);
-			self.add_byte(s.as_bytes());
-		}
-
-		fn push_array(&mut self, l: u16) {
-			// 1 instr + 2 u16
-			let mut arr: [u8; 3] = [0; 3];
-			arr[0] = PUSH_ARRAY;
-			add_int(1, &mut arr, l, u16::to_be_bytes);
-			self.add_byte(&arr);
-		}
-
-		fn push_block<F>(&mut self, mut add_block: F)
-		where F: FnMut(&mut Self) {
-			// 1 instr + 2 u16
-			let mut arr: [u8; 3] = [0; 3];
-			arr[0] = PUSH_BLOCK;
-			let initpos = self.pos() + 1;
-			self.add_byte(&arr);
-			add_block(self);
-			for (i, b) in initpos.to_be_bytes().into_iter().enumerate() {
-				self.change_idx(initpos+(i as u16), b);
-			}
-		}
-	}
+fn statcomperr(l: Location, msg: &str) -> CompileError {
+	CompileError(msg.to_owned(), l)
 }
 
+fn firstdup<T: Hash + Eq>(iter: impl Iterator<Item = T>) -> Option<T> {
+	let mut set = HashSet::new();
+	for ele in iter {
+		if set.contains(&ele) {
+			return Some(ele);
+		}
+		set.insert(ele);
+	}
+	None
+}
+
+pub type CompRes<T> = Result<T, CompileError>;
+
+enum Var<'a> {
+	Local(u16),
+	Field(u16),
+	Global(&'a str)
+}
+
+struct MessageCompiler<'a, 'b, 'c> {
+	refpt: usize,
+	locals: Vec<String>,
+	fields: &'c [String],
+	buf: &'b mut Vec<u8>,
+	symbol_store: &'a mut Vec<String>
+}
+
+
+
+impl<'a, 'b, 'c> Bytecodable for MessageCompiler<'a, 'b, 'c> {
+    fn add_byte(&mut self, b: &[u8]) {
+        self.buf.extend_from_slice(b);
+    }
+
+    fn change_idx(&mut self, idx: u16, val: u8) {
+        self.buf[self.refpt + (idx as usize)] = val;
+    }
+
+    fn symi_of_sym(&mut self, s: &str) -> u32 {
+		index_or_push(self.symbol_store, |sym| s == &*sym, || s.to_owned()) as u32
+    }
+
+    fn pos(&self) -> u16 {
+        self.buf.len() as u16
+    }
+}
+
+impl<'a, 'b, 'c> MessageCompiler<'a, 'b, 'c> {
+	fn compile_message(&mut self, MessageDef { args, vardecl, body, .. }: MessageDef) -> CompRes<()> {
+		firstdup(args.iter()).map_or(Ok(()), |var| Err(CompileError(format!("duplicate argument name: {var}"), (0, 0))))?;
+		firstdup(vardecl.iter()).map_or(Ok(()), |var| Err(CompileError(format!("duplicate local name: {var}"), (0, 0))))?;
+		self.locals.extend(args);
+		self.locals.extend(vardecl);
+		
+		if !self.pop_intersperse(body.iter())? {
+			self.return_self();
+		}
+		Ok(())
+	}
+
+	fn pop_intersperse<'d>(&mut self, mut exprs: impl Iterator<Item = &'d Expr>) -> CompRes<bool> {
+		let Some(e) = exprs.next() else { return Ok(false) };
+		self.compile_expr(e)?;
+		let mut expr = None;
+		for ele in exprs {
+			self.pop();
+			expr = Some(ele);
+			self.compile_expr(ele)?;
+		}
+		Ok(matches!(expr, Some((PureExpr::Return(_), _))))
+	}
+	
+	fn compile_expr(&mut self, (pexpr, loc): &Expr) -> CompRes<()> {
+		use PureExpr::*;
+		match pexpr {
+			Assignment(var, expr) => self.compile_assign(var, &expr, *loc)?,
+			Return(expr) => self.compile_return(&expr)?,
+			Str(s) => self.push_string(s),
+			Symbol(s) => self.push_symbol(s),
+			Char(c) => self.push_char(*c),
+			Array(a) => self.compile_array(a, *loc)?,
+			Int(i) => self.push_int(*i),
+			Float(f) => self.push_float(*f),
+			Variable(n) => self.compile_varref(&*n, *loc)?,
+			MsgSend(rec, selector, args) => self.compile_send(&rec, &*selector, &*args, *loc)?,
+			Block(args, tempvars, exprs) => self.compile_block(&*args, &*tempvars, &*exprs, *loc)?,
+			True => self.push_true(),
+			False => self.push_false(),
+			Nil => self.push_nil(),
+			SelfRef => self.push_self(),
+			Super => self.push_super(),
+		}
+		Ok(())
+	}
+
+	fn get_var<'d>(&mut self, s: &'d str, l: Location) -> CompRes<Var<'d>> {
+		let Some(c) = s.chars().next() else {
+			return Err(statcomperr(l, "a variable name must have at least one character"));
+		};
+
+		if c.is_uppercase() {
+			Ok(Var::Global(s))
+		} else if let Some(ilocal) = self.locals.iter().rposition(|l| &*l == s) {
+			Ok(Var::Local(ilocal as u16))
+		} else if let Some(ifield) = self.fields.iter().rposition(|l| &*l == s) {
+			Ok(Var::Field(ifield as u16))
+		} else {
+			Err(statcomperr(l, "variable not found"))
+		}
+	}
+
+	fn compile_assign(&mut self, var: &str, expr: &Expr, l: Location) -> CompRes<()> {
+		self.compile_expr(expr)?;
+		match self.get_var(var, l)? {
+			Var::Local(ilocal) => {
+				self.store_local(ilocal);
+			},
+			Var::Field(ifield) => {
+				self.store_field(ifield)
+			},
+			Var::Global(_) => return Err(statcomperr(l, "cannot assign to globals")),
+		}
+
+		Ok(())
+	}
+
+	fn compile_return(&mut self, expr: &Expr) -> CompRes<()> {
+		if let (PureExpr::SelfRef, _) = expr {
+			self.return_self();
+			return Ok(());
+		}
+		self.compile_expr(expr)?;
+		self.ret();
+		Ok(())
+	}
+
+	fn compile_array(&mut self, a: &[Expr], l: Location) -> CompRes<()> {
+		for expr in a {
+			self.compile_expr(expr)?;
+		}
+		let n = a.len()
+			.try_into()
+			.map_err(|e| CompileError(format!("{} (does your array literal exceed 65535 elements?)", e), l))?;
+		self.push_array(n);
+		Ok(())
+	}
+
+	fn compile_varref(&mut self, n: &str, l: Location) -> CompRes<()> {	
+		match self.get_var(n, l)? {
+			Var::Local(ilocal) => self.push_local(ilocal),
+			Var::Field(ifield) => self.push_field(ifield),
+			Var::Global(s) => self.push_global(s)
+		}
+		Ok(())
+	}
+
+	fn compile_send(&mut self, rec: &Expr, selector: &str, args: &[Expr], l: Location) -> CompRes<()> {
+		self.compile_expr(rec)?;
+		for arg in args {
+			self.compile_expr(arg)?;
+		}
+		self.send(selector, args.len().try_into()
+				  .map_err(|e| CompileError(format!("{e} (are you sending a message with more than 65.5k arguments?"), l))?);
+		Ok(())
+	}
+
+	fn compile_block(&mut self, args: &[String], tempvars: &[String], exprs: &[Expr], l: Location) -> CompRes<()> {
+		let startn = self.locals.len();
+		let argn: u16 = args.len().try_into().map_err(|e| CompileError(format!("{e} (do you have more than 65535 arguments?)"), l))?;
+
+		self.push_block(startn as u16, argn, |mpars| {
+			mpars.locals.extend_from_slice(args);
+			mpars.locals.extend_from_slice(tempvars);
+
+			if !mpars.pop_intersperse(exprs.iter())? {
+				mpars.push_nil();
+				mpars.return_block();
+			}
+			
+			mpars.locals[startn..].iter_mut().for_each(|l| l.truncate(0)); // prevents other blocks from reusing the variables by accident
+			Ok(())
+		})
+	}
+
+
+}
